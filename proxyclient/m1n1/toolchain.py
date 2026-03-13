@@ -157,21 +157,39 @@ class Toolchain:
         if self.use_clang:
             if llddir := os.environ.get("LLDDIR", ""):
                 toolchain_paths = (toolchain_paths[0], llddir)
-            self._set_tools_clang(*toolchain_paths)
+            self._set_tools_clang(toolchain_paths[0] or "", toolchain_paths[1] or None)
         else:
-            self._set_tools(*toolchain_paths)
+            self._set_tools(toolchain_paths[0] or "", toolchain_paths[1])
 
-    def _set_tools_clang(self, clangdir: str, llddir: str = None):
+    def _set_tools_clang(self, clangdir: str, llddir: str | None = None):
 
         if llddir is None:
             llddir = clangdir
 
+        def resolve_binary(name: str, preferred_dir: str | None = None):
+            if preferred_dir:
+                candidate = os.path.join(preferred_dir, name)
+                if os.path.exists(candidate):
+                    return candidate
+
+            candidate = shutil.which(name)
+            if candidate:
+                return candidate
+
+            return (preferred_dir or "") + name
+
+        clang = resolve_binary("clang", clangdir)
+        lld = resolve_binary("ld.lld", llddir)
+        objcopy = resolve_binary("llvm-objcopy", clangdir)
+        objdump = resolve_binary("llvm-objdump", clangdir)
+        nm = resolve_binary("llvm-nm", clangdir)
+
         # pylint: disable=invalid-name
-        self.CC = clangdir + "clang --target=" + self.ARCH + " " + self.CFLAGS
-        self.LD = llddir + "ld.lld -maarch64elf --pie"
-        self.OBJCOPY = clangdir + "llvm-objcopy"
-        self.OBJDUMP = clangdir + "llvm-objdump"
-        self.NM = clangdir + "llvm-nm"
+        self.CC = clang + " --target=" + self.ARCH + " " + self.CFLAGS
+        self.LD = lld + " -maarch64elf --pie"
+        self.OBJCOPY = objcopy
+        self.OBJDUMP = objdump
+        self.NM = nm
 
     def _set_tools(self, toolchain: str, _):
 

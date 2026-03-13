@@ -136,13 +136,23 @@ class UartInterface(Reloadable):
 
     @staticmethod
     def _detect_macos_uart():
-        candidates = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/tty.usbmodem*")
+        candidates = sorted(glob.glob("/dev/cu.usbmodem*")) + sorted(glob.glob("/dev/tty.usbmodem*"))
         if not candidates:
             return None
         for c in candidates:
             if c.endswith("1"):
                 return c
         return candidates[0]
+
+    def _open_serial(self, devpath=None):
+        if devpath is None:
+            devpath = self.devpath
+        self.devpath = devpath
+        self.dev = Serial(self.devpath, self.baudrate)
+        self.dev.timeout = 0
+        self.dev.flushOutput()
+        self.dev.reset_input_buffer()
+        self.dev.timeout = int(os.environ.get("M1N1TIMEOUT", "3"))
 
     def __init__(self, device=None, debug=False):
         self.debug = debug
@@ -162,12 +172,12 @@ class UartInterface(Reloadable):
             self.devpath = device
             self.baudrate = baud
 
-            device = Serial(self.devpath, baud)
+            self._open_serial(self.devpath)
+            device = self.dev
 
         self.dev = device
-        self.dev.timeout = 0
-        self.dev.flushOutput()
-        self.dev.flushInput()
+        if not hasattr(self, "baudrate"):
+            self.baudrate = getattr(self.dev, "baudrate", self.DEFAULT_BAUD_RATE)
         self.pted = False
         #d = self.dev.read(1)
         #while d != "":
@@ -343,15 +353,25 @@ class UartInterface(Reloadable):
             return self.reply(self.REQ_BOOT)
         except:
             # Over USB, reboots cause a reconnect
-            self.dev.close()
+            try:
+                self.dev.close()
+            except:
+                pass
             print("Waiting for reconnection... ", end="")
             sys.stdout.flush()
             for i in range(200):
                 print(".", end="")
                 sys.stdout.flush()
                 try:
-                    self.dev.open()
-                except serial.serialutil.SerialException:
+                    if platform.system() == 'Darwin' and os.environ.get("M1N1DEVICE") is None:
+                        new_dev = self._detect_macos_uart()
+                        if new_dev and new_dev != self.devpath:
+                            self._open_serial(new_dev)
+                        else:
+                            self.dev.open()
+                    else:
+                        self.dev.open()
+                except serial.SerialException:
                     time.sleep(0.1)
                 else:
                     break

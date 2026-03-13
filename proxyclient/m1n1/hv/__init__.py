@@ -1366,6 +1366,11 @@ class HV(Reloadable):
         # disable unused USB iodev early so interrupts can be reenabled in hv_init()
         for iodev in IODEV:
             if iodev >= IODEV.USB0 and iodev != self.iodev:
+                usb_idx = iodev - IODEV.USB0
+                try:
+                    self.adt[f"/arm-io/usb-drd{usb_idx}"]
+                except KeyError:
+                    continue
                 print(f"Disable iodev {iodev!s}")
                 self.p.iodev_set_usage(iodev, 0)
 
@@ -1496,7 +1501,10 @@ class HV(Reloadable):
                         hook_pmgr_dev(dev_by_id[idx])
 
         for name in hook_devs:
-            dev = dev_by_name[name]
+            dev = dev_by_name.get(name)
+            if dev is None:
+                self.log(f"Skipping missing PMGR device {name}")
+                continue
             hook_pmgr_dev(dev)
 
         pmgr0_start = pmgr.get_reg(0)[0]
@@ -1897,6 +1905,12 @@ class HV(Reloadable):
         print("Disabling other iodevs...")
         for iodev in IODEV:
             if iodev != self.iodev:
+                if iodev >= IODEV.USB0:
+                    usb_idx = iodev - IODEV.USB0
+                    try:
+                        self.adt[f"/arm-io/usb-drd{usb_idx}"]
+                    except KeyError:
+                        continue
                 print(f" - {iodev!s}")
                 self.p.iodev_set_usage(iodev, 0)
 
