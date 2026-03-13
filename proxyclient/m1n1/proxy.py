@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-import platform, os, sys, struct, serial, time
+import platform, os, sys, struct, serial, time, glob
 from construct import *
 from enum import IntEnum, IntFlag
 from serial.tools.miniterm import Miniterm
@@ -133,14 +133,27 @@ class UartInterface(Reloadable):
 
     DEFAULT_UART_DEV="/dev/m1n1"
     DEFAULT_BAUD_RATE=115200
-    if platform.system() == 'Darwin':
-        DEFAULT_UART_DEV="/dev/cu.usbmodemP_01"
+
+    @staticmethod
+    def _detect_macos_uart():
+        candidates = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/tty.usbmodem*")
+        if not candidates:
+            return None
+        for c in candidates:
+            if c.endswith("1"):
+                return c
+        return candidates[0]
 
     def __init__(self, device=None, debug=False):
         self.debug = debug
         self.devpath = None
         if device is None:
-            device = os.environ.get("M1N1DEVICE", self.DEFAULT_UART_DEV)
+            device = os.environ.get("M1N1DEVICE")
+            if device is None:
+                if platform.system() == 'Darwin':
+                    device = self._detect_macos_uart()
+                if device is None:
+                    device = self.DEFAULT_UART_DEV
         if isinstance(device, str):
             baud = self.DEFAULT_BAUD_RATE
             if ":" in device:
