@@ -102,6 +102,17 @@ class GDBServer:
         if cpu is None:
             return
 
+        current_cpu = None
+        if self.__hv.ctx is not None:
+            current_cpu = self.__hv.ctx.cpu_id
+        elif self.__hv.exc_orig_cpu is not None:
+            current_cpu = self.__hv.exc_orig_cpu
+
+        if current_cpu is not None and cpu != current_cpu:
+            if self.log:
+                self.log(f"ignoring CPU switch request to #{cpu}; staying on current CPU #{current_cpu}")
+            return
+
         self.__hv.cpu(cpu)
 
     def __stop_reply(self):
