@@ -431,6 +431,8 @@ class HV(Reloadable):
 
     def shutdown_gdbserver(self):
         '''shutdown gdbserver'''
+        if self._gdbserver is None:
+            return
         self._gdbserver.shutdown()
         self._gdbserver = None
 
@@ -1365,7 +1367,7 @@ class HV(Reloadable):
 
         # disable unused USB iodev early so interrupts can be reenabled in hv_init()
         for iodev in IODEV:
-            if iodev >= IODEV.USB0 and iodev != self.iodev:
+            if iodev >= IODEV.USB0 and not self._should_keep_iodev(iodev):
                 usb_idx = iodev - IODEV.USB0
                 try:
                     self.adt[f"/arm-io/usb-drd{usb_idx}"]
@@ -1375,8 +1377,6 @@ class HV(Reloadable):
                 self.p.iodev_set_usage(iodev, 0)
 
         print("Initializing hypervisor over iodev %s" % self.iodev)
-        self.p.hv_init()
-
         self.iface.set_handler(START.EXCEPTION_LOWER, EXC.SYNC, self.handle_exception)
         self.iface.set_handler(START.EXCEPTION_LOWER, EXC.IRQ, self.handle_exception)
         self.iface.set_handler(START.EXCEPTION_LOWER, EXC.FIQ, self.handle_exception)
@@ -1391,6 +1391,8 @@ class HV(Reloadable):
         self.iface.set_handler(START.HV, HV_EVENT.PANIC, self.handle_bark)
         self.iface.set_event_handler(EVENT.MMIOTRACE, self.handle_mmiotrace)
         self.iface.set_event_handler(EVENT.IRQTRACE, self.handle_irqtrace)
+
+        self.p.hv_init()
 
         # Map MMIO ranges as HW by default
         for r in self.adt["/arm-io"].ranges:
@@ -1465,14 +1467,33 @@ class HV(Reloadable):
         self.p.hv_map_vuart(base, irq, self.iodev)
         self.add_tracer(zone, "VUART", TraceMode.RESERVED)
 
+    def _protected_usb_indices(self):
+        if self.iodev == IODEV.USB_VUART:
+            return [idx for idx in range(8) if f"/arm-io/usb-drd{idx}" in self.adt]
+
+        if self.iodev >= IODEV.USB0:
+            return [self.iodev - IODEV.USB0]
+
+        return []
+
+    def _should_keep_iodev(self, iodev):
+        if iodev == self.iodev:
+            return True
+
+        if self.iodev == IODEV.USB_VUART and iodev >= IODEV.USB0:
+            usb_idx = iodev - IODEV.USB0
+            return f"/arm-io/usb-drd{usb_idx}" in self.adt
+
+        return False
+
     def map_essential(self):
         # Things we always map/take over, for the hypervisor to work
         _pmgr = {}
 
         def wh(base, off, data, width):
-            self.log(f"PMGR W {base:x}+{off:x}:{width} = 0x{data:x}: Dangerous write")
-            self.p.mask32(base + off, 0x3ff, (data | 0xf) & ~(0x80000400))
-            _pmgr[base + off] = (data & 0xfffffc0f) | ((data & 0xf) << 4)
+            shadow = (data & 0xfffffc0f) | ((data & 0xf) << 4)
+            self.log(f"PMGR W {base:x}+{off:x}:{width} = 0x{data:x} -> 0x{shadow:x}: Shadow-only dangerous write")
+            _pmgr[base + off] = shadow
 
         def rh(base, off, width):
             data = self.p.read32(base + off)
@@ -1480,10 +1501,9 @@ class HV(Reloadable):
             self.log(f"PMGR R {base:x}+{off:x}:{width} = 0x{data:x} -> 0x{ret:x}")
             return ret
 
-        atc = f"ATC{self.iodev - IODEV.USB0}_USB"
-        atc_aon = f"ATC{self.iodev - IODEV.USB0}_USB_AON"
-
-        hook_devs = ["UART0", atc, atc_aon]
+        hook_devs = ["UART0"]
+        for idx in self._protected_usb_indices():
+            hook_devs += [f"ATC{idx}_USB", f"ATC{idx}_USB_AON"]
 
         pmgr = self.adt["/arm-io/pmgr"]
         dev_by_name = {dev.name: dev for dev in pmgr.devices}
@@ -1612,33 +1632,34 @@ class HV(Reloadable):
         # to re-enable XNU serial output for newer macOS versions
         self.adt["defaults"].serial_device = getattr(self.adt["/arm-io/uart0"], "AAPL,phandle")
 
-        if self.iodev >= IODEV.USB0:
-            idx = self.iodev - IODEV.USB0
-            for prefix in ("/arm-io/dart-usb%d",
-                           "/arm-io/atc-phy%d",
-                           "/arm-io/usb-drd%d",
-                           "/arm-io/acio%d",
-                           "/arm-io/acio-cpu%d",
-                           "/arm-io/dart-acio%d",
-                           "/arm-io/apciec%d",
-                           "/arm-io/dart-apciec%d",
-                           "/arm-io/apciec%d-piodma",
-                           "/arm-io/i2c0/hpmBusManager/hpm%d",
-                           "/arm-io/i2c0/hpmBusManager1/hpm%d",
-                           "/arm-io/i2c3/hpmBusManager0/hpm%d",
-                           "/arm-io/nub-spmi-a0/hpm%d",
-                           "/arm-io/atc%d-dpxbar",
-                           "/arm-io/atc%d-dpphy",
-                           "/arm-io/atc%d-dpin0",
-                           "/arm-io/atc%d-dpin1",
-                           "/arm-io/atc-phy%d",
-                          ):
-                name = prefix % idx
-                print(f"Removing ADT node {name}")
-                try:
-                    del self.adt[name]
-                except KeyError:
-                    pass
+        protected_usb_indices = self._protected_usb_indices()
+        if protected_usb_indices:
+            for idx in protected_usb_indices:
+                for prefix in ("/arm-io/dart-usb%d",
+                               "/arm-io/atc-phy%d",
+                               "/arm-io/usb-drd%d",
+                               "/arm-io/acio%d",
+                               "/arm-io/acio-cpu%d",
+                               "/arm-io/dart-acio%d",
+                               "/arm-io/apciec%d",
+                               "/arm-io/dart-apciec%d",
+                               "/arm-io/apciec%d-piodma",
+                               "/arm-io/i2c0/hpmBusManager/hpm%d",
+                               "/arm-io/i2c0/hpmBusManager1/hpm%d",
+                               "/arm-io/i2c3/hpmBusManager0/hpm%d",
+                               "/arm-io/nub-spmi-a0/hpm%d",
+                               "/arm-io/atc%d-dpxbar",
+                               "/arm-io/atc%d-dpphy",
+                               "/arm-io/atc%d-dpin0",
+                               "/arm-io/atc%d-dpin1",
+                               "/arm-io/atc-phy%d",
+                              ):
+                    name = prefix % idx
+                    print(f"Removing ADT node {name}")
+                    try:
+                        del self.adt[name]
+                    except KeyError:
+                        pass
 
         if self.wdt_cpu is not None:
             name = f"/cpus/cpu{self.wdt_cpu}"
@@ -1904,7 +1925,7 @@ class HV(Reloadable):
     def start(self):
         print("Disabling other iodevs...")
         for iodev in IODEV:
-            if iodev != self.iodev:
+            if not self._should_keep_iodev(iodev):
                 if iodev >= IODEV.USB0:
                     usb_idx = iodev - IODEV.USB0
                     try:

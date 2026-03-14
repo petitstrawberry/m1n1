@@ -32,6 +32,14 @@
           ]
         );
 
+        debuggerPkg =
+          if pkgs.stdenv.hostPlatform.isDarwin then
+            pkgs.writeShellScriptBin "gdb" ''
+              exec ${pkgs.lldb}/bin/lldb "$@"
+            ''
+          else
+            pkgs.gdb;
+
         buildInputs = with pkgs; [
           pythonEnv
           llvmPackages_18.clang
@@ -48,7 +56,10 @@
           pname = "m1n1";
           version = "unstable-${self.shortRev or "dirty"}";
 
-          src = ./.;
+          src = builtins.path {
+            path = ./.;
+            name = "m1n1-src";
+          };
 
           nativeBuildInputs = with pkgs; [
             llvmPackages_18.clang
@@ -65,9 +76,12 @@
           makeFlags = [
             "RELEASE=1"
             "USE_CLANG=1"
+            "TOOLCHAIN=${pkgs.clang}/bin/"
+            "LLDDIR=${pkgs.lld}/bin/"
+            "LLVM_CONFIG=${pkgs.llvmPackages_18.llvm}/bin/llvm-config"
             "CC=${pkgs.llvmPackages_18.clang}/bin/clang"
             "LD=${pkgs.llvmPackages_18.bintools}/bin/ld.lld"
-            "OBJCOPY=${pkgs.llvmPackages_18.bintools}/bin/llvm-objcopy"
+            "OBJCOPY=${pkgs.llvmPackages_18.llvm}/bin/llvm-objcopy"
           ];
 
           installPhase = ''
@@ -91,9 +105,14 @@
             pythonEnv
             gnumake
             git
+            tmux
+            lldb
             llvmPackages_18.clang-unwrapped
             llvmPackages_18.lld
             llvmPackages_18.llvm
+            (rust-bin.stable.latest.default.override {
+              targets = [ "aarch64-unknown-none-softfloat" ];
+            })
           ];
 
           LLVM_CONFIG = "${pkgs.llvmPackages_18.llvm}/bin/llvm-config";

@@ -46,6 +46,7 @@ hv = HV(iface, p, u)
 
 hv.hook_exceptions = args.hook_exceptions
 
+iface.dev.reset_input_buffer()
 hv.init()
 
 if args.cpus:

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-import errno, io, os, pkgutil, re, selectors, socketserver, threading, traceback
+import errno, io, os, pkgutil, re, selectors, socket, socketserver, threading, traceback
 from construct import Array, BytesInteger, Container, Int32ul, Int64ul, Struct
 
 from ...proxy import *
@@ -21,16 +21,61 @@ class GDBServer:
     )
     __separator = re.compile("[,;:]")
 
+    def __make_interrupt_fd(self):
+        eventfd = getattr(os, "eventfd", None)
+        if eventfd is not None:
+            fd = eventfd(0, flags=os.EFD_CLOEXEC | os.EFD_NONBLOCK)
+            return True, fd, fd
+
+        reader, writer = socket.socketpair()
+        reader.setblocking(False)
+        writer.setblocking(False)
+        return False, reader, writer
+
+    def __clear_interrupt_fd(self):
+        try:
+            if self.__interrupt_is_eventfd:
+                getattr(os, "eventfd_read")(self.__interrupt_reader)
+            else:
+                while self.__interrupt_reader.recv(4096):
+                    pass
+        except BlockingIOError:
+            pass
+        except OSError as error:
+            if error.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise
+
+    def __signal_interrupt_fd(self):
+        try:
+            if self.__interrupt_is_eventfd:
+                getattr(os, "eventfd_write")(self.__interrupt_writer, 1)
+            else:
+                self.__interrupt_writer.send(b"\x01")
+        except BlockingIOError:
+            pass
+        except OSError as error:
+            if error.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise
+
+    def __close_interrupt_fd(self):
+        if self.__interrupt_is_eventfd:
+            os.close(self.__interrupt_reader)
+            return
+
+        self.__interrupt_reader.close()
+        self.__interrupt_writer.close()
+
     def __init__(self, hv, address, log):
         self.__hc = None
         self.__hg = None
         self.__hv = hv
-        self.__interrupt_eventfd = os.eventfd(0, flags=os.EFD_CLOEXEC | os.EFD_NONBLOCK)
+        self.__interrupt_is_eventfd, self.__interrupt_reader, self.__interrupt_writer = self.__make_interrupt_fd()
         self.__interrupt_selector = selectors.DefaultSelector()
         self.__request = None
+        self.__detach_requested = False
         self.log = log
 
-        self.__interrupt_selector.register(self.__interrupt_eventfd, selectors.EVENT_READ)
+        self.__interrupt_selector.register(self.__interrupt_reader, selectors.EVENT_READ)
 
         handle = self.__handle
 
@@ -85,13 +130,28 @@ class GDBServer:
         return prefix + bytes(format(self.__hv.ctx.cpu_id, "x"), "utf-8") + b";"
 
     def __wait_shell(self):
-        try:
-            os.eventfd_read(self.__interrupt_eventfd)
-        except BlockingIOError:
-            pass
+        self.__clear_interrupt_fd()
 
-        while not self.__interrupt_eventfd in (key.fileobj for key, mask in self.__interrupt_selector.select()):
-            recv = self.__request.recv(1)
+        while True:
+            try:
+                selected = self.__interrupt_selector.select()
+            except OSError:
+                self.__detach_requested = True
+                break
+
+            if self.__interrupt_reader in (key.fileobj for key, mask in selected):
+                break
+
+            if self.__request is None:
+                self.__detach_requested = True
+                break
+
+            try:
+                recv = self.__request.recv(1)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self.__detach_requested = True
+                break
+
             if not recv:
                 break
 
@@ -118,6 +178,10 @@ class GDBServer:
             self.__hv.cont()
             self.__wait_shell()
             return self.__stop_reply()
+
+        if data[0] in b"D":
+            self.__detach_requested = True
+            return b"OK"
 
         if data[0] in b"g":
             self.__cpu(self.__hg)
@@ -377,10 +441,14 @@ class GDBServer:
             if self.log:
                 self.log(f"send: {value}")
 
-            self.__request.send(value)
+            try:
+                self.__request.send(value)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self.__detach_requested = True
 
     def __handle(self, request):
         self.__request = request
+        self.__detach_requested = False
         input_buffer = b""
 
         if not self.__hv.in_shell:
@@ -418,10 +486,18 @@ class GDBServer:
                         continue
 
                     if (sum(input_data) % 256) != parsed_input_checksum:
-                        self.__request.send(b"-")
+                        try:
+                            self.__request.send(b"-")
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            self.__detach_requested = True
+                            break
                         continue
 
-                    self.__request.send(b"+")
+                    try:
+                        self.__request.send(b"+")
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        self.__detach_requested = True
+                        break
 
                     with io.BytesIO() as input_decoded:
                         input_index = 0
@@ -453,11 +529,24 @@ class GDBServer:
                             output_decoded = b"E." + bytes(traceback.format_exc(), "utf-8")
 
                     self.__send(b"$", output_decoded)
+
+                    if self.__detach_requested:
+                        break
+
+                if self.__detach_requested:
+                    break
         finally:
-            self.__interrupt_selector.unregister(self.__request)
+            try:
+                self.__interrupt_selector.unregister(self.__request)
+            except Exception:
+                pass
+            self.__request = None
+            self.__hc = None
+            self.__hg = None
+            self.__detach_requested = False
 
     def notify_in_shell(self):
-        os.eventfd_write(self.__interrupt_eventfd, 1)
+        self.__signal_interrupt_fd()
 
     def activate(self):
         try:
@@ -473,7 +562,7 @@ class GDBServer:
         self.__thread.start()
 
     def shutdown(self):
-        os.close(self.__interrupt_eventfd)
+        self.__close_interrupt_fd()
         self.__interrupt_selector.close()
         self.__server.shutdown()
         self.__server.server_close()
