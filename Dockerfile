@@ -1,9 +1,11 @@
 FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y build-essential bash curl git locales gcc-aarch64-linux-gnu libc6-dev-arm64-cross device-tree-compiler \
+RUN apt-get update && apt-get install -y build-essential bash curl git locales gcc-aarch64-linux-gnu libc6-dev-arm64-cross device-tree-compiler imagemagick \
     && rm -rf /var/lib/apt/lists/* \
     && localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
+
+RUN ln -sf /usr/bin/convert /usr/local/bin/magick
 
 RUN curl -s https://sh.rustup.rs | bash -s -- -y --target aarch64-unknown-none-softfloat
 
