@@ -20,6 +20,9 @@ typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
 
+typedef u64 uintptr_t;
+typedef s64 ptrdiff_t;
+
 typedef s64 ssize_t;
 
 #endif

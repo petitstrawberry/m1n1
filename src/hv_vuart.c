@@ -8,11 +8,6 @@
 #include "usb.h"
 
 bool active = false;
-bool vuart_tx_stubbed = true;
-
-static bool vuart_logged_setup = false;
-static bool vuart_logged_tx = false;
-static bool vuart_logged_rx = false;
 
 u32 ucon = 0;
 u32 utrstat = 0;
@@ -99,11 +94,7 @@ static bool handle_vuart(struct exc_info *ctx, u64 addr, u64 *val, bool write, i
                 break;
             case UTXH: {
                 uint8_t b = *val;
-                if (!vuart_logged_tx) {
-                    printf("HV: vuart first TX byte 0x%02x (stub=%d)\n", b, vuart_tx_stubbed);
-                    vuart_logged_tx = true;
-                }
-                if (!vuart_tx_stubbed && iodev_can_write(IODEV_USB_VUART))
+                if (iodev_can_write(IODEV_USB_VUART))
                     iodev_write(IODEV_USB_VUART, &b, 1);
                 handle_vuart_passthrough(b);
                 break;
@@ -121,10 +112,6 @@ static bool handle_vuart(struct exc_info *ctx, u64 addr, u64 *val, bool write, i
                 if (iodev_can_read(IODEV_USB_VUART)) {
                     uint8_t c;
                     iodev_read(IODEV_USB_VUART, &c, 1);
-                    if (!vuart_logged_rx) {
-                        printf("HV: vuart first RX byte 0x%02x\n", c);
-                        vuart_logged_rx = true;
-                    }
                     *val = c;
                 } else {
                     *val = 0;
@@ -158,11 +145,6 @@ void hv_map_vuart(u64 base, int irq, iodev_id_t iodev)
 {
     hv_map_hook(base, handle_vuart, 0x1000);
     usb_iodev_vuart_setup(iodev);
-    if (!vuart_logged_setup) {
-        printf("HV: map_vuart base=%lx irq=%d iodev=%d tx_stubbed=%d\n", base, irq, iodev,
-               vuart_tx_stubbed);
-        vuart_logged_setup = true;
-    }
     vuart_irq = irq;
     active = true;
 }
