@@ -107,6 +107,7 @@
             git
             tmux
             lldb
+            picocom
             llvmPackages_18.clang-unwrapped
             llvmPackages_18.lld
             llvmPackages_18.llvm
